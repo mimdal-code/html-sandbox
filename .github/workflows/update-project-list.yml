@@ -1,0 +1,81 @@
+name: Update project list
+
+on:
+  workflow_dispatch:        # manual trigger
+  push:
+    branches: [main]        # optional: also run on push
+    paths:
+      - '*/README.md'       # only when a project README changes
+
+permissions:
+  contents: write
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate project list
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          START="<!-- PROJECTS:START -->"
+          END="<!-- PROJECTS:END -->"
+
+          entries=""
+          for dir in */ ; do
+            dir="${dir%/}"                        # strip trailing slash
+            [ "$dir" = ".github" ] && continue
+            [ -f "$dir/README.md" ] || continue
+
+            # First non-empty line that isn't a markdown heading
+            desc="$(grep -m1 -v -E '^\s*$|^#' "$dir/README.md" || true)"
+            # Collapse whitespace, escape pipes, trim
+            desc="$(printf '%s' "$desc" | sed -E 's/\s+/ /g; s/^\s+|\s+$//g')"
+            [ -z "$desc" ] && desc="$(printf 'Project: %s' "$dir")"
+
+            entries+="- [${dir}](./${dir}/README.md) — ${desc}"$'\n'
+          done
+
+          if [ -z "$entries" ]; then
+            entries="_No projects yet._"$'\n'
+          fi
+
+          # Replace content between markers using Python (safe multiline replace)
+          python3 - "$START" "$END" <<'PY'
+          import sys, pathlib
+          start, end = sys.argv[1], sys.argv[2]
+          path = pathlib.Path("README.md")
+          text = path.read_text()
+          new_block = pathlib.Path("/tmp/entries.txt")
+          # entries were written below
+          PY
+
+          # Simpler: write entries to a temp file, then splice with python
+          printf '%s' "$entries" > /tmp/entries.txt
+          python3 - <<'PY'
+          import pathlib
+          start, end = "<!-- PROJECTS:START -->", "<!-- PROJECTS:END -->"
+          p = pathlib.Path("README.md")
+          text = p.read_text()
+          entries = pathlib.Path("/tmp/entries.txt").read_text()
+          block = f"{start}\n{entries}{end}"
+          before, rest = text.split(start, 1)
+          _, after = rest.split(end, 1)
+          p.write_text(before + block + after)
+          PY
+
+      - name: Commit if changed
+        shell: bash
+        run: |
+          if git diff --quiet README.md; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "chore: update project list"
+          git push
